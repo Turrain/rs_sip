@@ -198,6 +198,7 @@ impl EventHandler for RegistrationMonitor {
             if let Event::Registration(reg_event) = event {
                 let timestamp = chrono::Local::now().format("%H:%M:%S");
                 match reg_event {
+                    
                     RegistrationEvent::Registered { account_id } => {
                         println!("\n[{}] ✓ REGISTERED: {}", timestamp, account_id.0);
                     }

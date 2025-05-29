@@ -337,7 +337,26 @@ impl Endpoint {
         source: SocketAddr,
         transport: Arc<dyn Transport>,
     ) -> Result<()> {
-        // Create server transaction
+        // Check for existing server transaction first
+        let method = request.method().unwrap_or(&SipMethod::Options);
+        let via = request.get_via();
+        
+        if let Some(via_header) = via {
+            let transaction_id = TransactionId::from_message(method, &via_header.branch);
+            
+            // Check if this is a retransmission
+            if let Some(existing_txn) = self.registry.transaction_manager
+                .find_transaction(&transaction_id).await {
+                
+                // Handle retransmission
+                let _ = existing_txn.event_tx.send(
+                    TransactionEvent::ReceivedRequest(request, source)
+                ).await;
+                return Ok(());
+            }
+        }
+        
+        // Create new server transaction
         let transaction = self.registry.transaction_manager
             .create_server_transaction(request.clone(), transport.clone(), source)
             .await?;
@@ -462,22 +481,26 @@ impl MessageHandler for EndpointMessageHandler {
                 ));
                 
                 if message.is_request() {
-                    // Check if this is a retransmission for existing transaction
-                    if let Some(transaction) = ep.registry.transaction_manager.find_transaction_for_message(&message).await {
-                        // Forward to existing transaction
-                        let _ = transaction.event_tx.send(TransactionEvent::ReceivedRequest(message, source)).await;
-                    } else {
-                        // New request
-                        if let Err(e) = ep.handle_incoming_request(message, source, transport).await {
-                            self.logger.error(&format!("Failed to handle incoming request: {}", e));
-                        }
+                    // Handle request
+                    if let Err(e) = ep.handle_incoming_request(message, source, transport).await {
+                        self.logger.error(&format!("Failed to handle incoming request: {}", e));
                     }
                 } else {
-                    // Response - find matching transaction
-                    if let Some(transaction) = ep.registry.transaction_manager.find_transaction_for_message(&message).await {
-                        let _ = transaction.event_tx.send(TransactionEvent::ReceivedResponse(message)).await;
+                    // Response - find matching client transaction
+                    if let Some(transaction_id) = TransactionId::from_response(&message) {
+                        if let Some(transaction) = ep.registry.transaction_manager
+                            .find_transaction(&transaction_id).await {
+                            let _ = transaction.event_tx.send(
+                                TransactionEvent::ReceivedResponse(message)
+                            ).await;
+                        } else {
+                            self.logger.warn(&format!(
+                                "Received response without matching transaction: {}", 
+                                transaction_id.0
+                            ));
+                        }
                     } else {
-                        self.logger.warn("Received response without matching transaction");
+                        self.logger.warn("Could not extract transaction ID from response");
                     }
                 }
             }

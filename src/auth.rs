@@ -508,6 +508,8 @@ pub fn add_authentication(
     // Increment nonce count for next request
     auth_ctx.increment_nc();
 
+    println!("Added authentication header: {}", header_name);
+    
     Ok(())
 }
 

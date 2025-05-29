@@ -5,6 +5,8 @@ use std::net::SocketAddr;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::SipMessage;
+
 #[derive(Debug, Clone)]
 pub enum SipError {
     ParseError(String),
@@ -552,9 +554,9 @@ impl ContactHeader {
 pub fn generate_branch() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+    // RFC 3261 requires z9hG4bK prefix + unique suffix
     format!("z9hG4bK{:x}{:x}", now.as_secs(), now.subsec_nanos())
 }
-
 // Generate a random Call-ID
 pub fn generate_call_id(host: &str) -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -631,7 +633,20 @@ pub struct TransactionId(pub String);
 
 impl TransactionId {
     pub fn from_message(method: &SipMethod, branch: &str) -> Self {
-        TransactionId(format!("{}:{}", method.as_str(), branch))
+        // For RFC 3261 compliance, use branch as primary identifier
+        if branch.starts_with("z9hG4bK") {
+            TransactionId(format!("{}:{}", method.as_str(), branch))
+        } else {
+            // RFC 2543 compatibility - use method+branch
+            TransactionId(format!("{}:{}", method.as_str(), branch))
+        }
+    }
+    
+    // New method for matching responses
+    pub fn from_response(response: &SipMessage) -> Option<Self> {
+        let via = response.get_via()?;
+        let cseq = response.get_cseq()?;
+        Some(TransactionId::from_message(&cseq.method, &via.branch))
     }
 }
 

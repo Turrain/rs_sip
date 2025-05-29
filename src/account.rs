@@ -271,6 +271,16 @@ impl Account {
         loop {
             attempts += 1;
             
+            // Generate new branch for each attempt (RFC 3261 requirement)
+            let new_branch = generate_branch();
+            if let Some(mut via) = request.get_via() {
+                via.branch = new_branch.clone();
+                request.headers.set(
+                    HeaderName::new(HeaderName::VIA),
+                    via.to_string(),
+                );
+            }
+            
             // Create transaction
             let transaction = self.registry.transaction_manager
                 .create_client_transaction(request.clone(), transport.clone(), target)
@@ -278,12 +288,12 @@ impl Account {
 
             // Send request
             transaction.event_tx.send(TransactionEvent::SendRequest(
-                transaction.request.clone(),
-                transaction.remote_addr
+                request.clone(),
+                target
             )).await.map_err(|_| SipError::InvalidState("Failed to send request".to_string()))?;
 
-            // Wait for response
-            let response = self.wait_for_transaction_response(transaction).await?;
+            // Wait for response with timeout
+            let response = self.wait_for_transaction_response(transaction.clone()).await?;
             let status = response.status_code().unwrap_or(0);
             
             match status {
@@ -292,6 +302,8 @@ impl Account {
                     if attempts >= max_attempts {
                         return Err(SipError::AuthenticationFailed);
                     }
+                    
+                    self.logger.info(&format!("Received {} authentication challenge", status));
                     
                     // Get challenge header
                     let auth_header = if status == 401 {
@@ -302,6 +314,8 @@ impl Account {
                     
                     let challenge_header = response.headers.get(auth_header)
                         .ok_or_else(|| SipError::InvalidHeader("Missing authentication challenge".to_string()))?;
+                    
+                    self.logger.debug(&format!("Challenge: {}", challenge_header));
                     
                     // Parse challenge and update auth context
                     let challenge = parse_digest_challenge(challenge_header)?;
@@ -323,6 +337,7 @@ impl Account {
                         );
                     }
                     
+                    self.logger.info("Retrying request with authentication");
                     // Try again with authentication
                     continue;
                 }
@@ -335,7 +350,7 @@ impl Account {
     }
 
     async fn wait_for_transaction_response(&self, transaction: Arc<Transaction>) -> Result<SipMessage> {
-        let timeout_duration = Duration::from_secs(32); // F timer for non-INVITE
+        let timeout_duration = Duration::from_secs(32); // Timer F for non-INVITE
         let start = tokio::time::Instant::now();
         
         loop {
@@ -422,11 +437,11 @@ impl Account {
         let mut builder = SipMessageBuilder::new()
             .request(SipMethod::Register, registrar_uri.clone());
 
-        // Via header
+        // Via header with NEW branch for each request
         let via = ViaHeader::new(
             transport.protocol(),
             &local_addr.to_string(),
-            &generate_branch(),
+            &generate_branch(), // Always generate new branch
         );
         builder = builder.header(HeaderName::VIA, &via.to_string());
 
@@ -452,7 +467,7 @@ impl Account {
             &format!("{} <{}>", self.config.display_name, to_uri),
         );
 
-        // Call-ID
+        // Call-ID (reuse for same registration session)
         let call_id = if let Some(ref reg) = *self.registration_manager.current_registration.read().await {
             reg.call_id.clone()
         } else {
@@ -460,7 +475,7 @@ impl Account {
         };
         builder = builder.header(HeaderName::CALL_ID, &call_id);
 
-        // CSeq
+        // CSeq - increment for each request
         let cseq = self.cseq_counter.fetch_add(1, Ordering::SeqCst);
         builder = builder.header(HeaderName::CSEQ, &format!("{} REGISTER", cseq));
 
