@@ -520,18 +520,21 @@ mod tests {
         on_async!(bus, UserCreated, move |event: UserCreated| {
             let counter = counter_clone.clone();
             async move {
-                println!("Async: User created: {} ({})", event.name, event.id);
-                sleep(Duration::from_millis(10)).await;
+                println!("Async: User created: {} ({}) ({})", event.name, event.id, counter.load(Ordering::SeqCst));
+           //     sleep(Duration::from_millis(10)).await;
                 counter.fetch_add(1, Ordering::SeqCst);
             }
         });
+        for i in 0..10 {
+            emit_async!(bus, UserCreated {
+                id: i,
+                name: "Alice".to_string(),
+            });
+        }
+       
 
-        emit_async!(bus, UserCreated {
-            id: 2,
-            name: "Bob".to_string(),
-        });
 
-        assert_eq!(counter.load(Ordering::SeqCst), 1);
+        assert_eq!(counter.load(Ordering::SeqCst), 10);
     }
 
     #[test]
@@ -628,6 +631,62 @@ mod tests {
         assert_eq!(data.read().unwrap()[0], "Async User");
     }
 
+    #[tokio::test]
+    async fn test_async_with_threads() {
+        let bus = Arc::new(EventBus::new());
+        let counter = Arc::new(AtomicUsize::new(0));
+        let data = Arc::new(RwLock::new(Vec::<String>::new()));
+        let num_threads = 5;
+        let events_per_thread = 100;
+
+        let mut handles = Vec::new();
+        
+        // Register a single handler for all threads
+        let counter_clone = counter.clone();
+        let data_clone = data.clone();
+        bus.on_async::<UserCreated, _, _>(move |event| {
+            let counter = counter_clone.clone();
+            let data = data_clone.clone();
+            async move {
+                sleep(Duration::from_millis(1)).await;
+                let count = counter.fetch_add(1, Ordering::SeqCst);
+                println!("Handler processed event: {} (total processed: {})", event.name, count + 1);
+                data.write().unwrap().push(event.name);
+            }
+        });
+        
+        // Spawn multiple threads that emit events
+        for t in 0..num_threads {
+            let bus = bus.clone();
+
+            println!("Spawning thread {}", t);
+            let handle = tokio::spawn(async move {
+                for i in 0..events_per_thread {
+                    let event = UserCreated {
+                        id: (t * events_per_thread + i) as u64,
+                        name: format!("User {}:{}", t, i),
+                    };
+                    println!("Thread {} emitting event: {}", t, event.name);
+                    emit_async!(bus, event);
+                }
+                println!("Thread {} completed", t);
+            });
+            
+            handles.push(handle);
+        }
+
+        // Wait for all threads to complete
+        for (i, handle) in handles.into_iter().enumerate() {
+            handle.await.unwrap();
+            println!("Thread {} joined", i);
+        }
+
+        let final_count = counter.load(Ordering::SeqCst);
+        let final_data_len = data.read().unwrap().len();
+        println!("Final count: {}, Data length: {}", final_count, final_data_len);
+        assert_eq!(final_count, num_threads * events_per_thread);
+        assert_eq!(final_data_len, num_threads * events_per_thread);
+    }
     #[test]
     fn test_auto_unsubscribe() {
         let bus = Arc::new(EventBus::new());
