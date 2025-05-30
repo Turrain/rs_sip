@@ -24,6 +24,8 @@ mod transaction;
 #[path = "transport.rs"]
 mod transport;
 
+pub mod event_system;
+
 // Re-export core types
 pub use crate::account::*;
 pub use crate::call::*;
